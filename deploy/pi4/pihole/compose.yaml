@@ -1,0 +1,18 @@
+services:
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    # Host networking so Pi-hole sees real client IPs (IPv4 and IPv6)
+    network_mode: host
+    environment:
+      TZ: "America/New_York"
+      FTLCONF_dns_listeningMode: "all"
+      # Upstream: dnscrypt-proxy on the host (encrypted DNS to Cloudflare)
+      FTLCONF_dns_upstreams: "127.0.0.1#5053"
+      # Web UI on 8080 so port 80 stays free for later services (Mealie etc.)
+      FTLCONF_webserver_port: "8080o,[::]:8080o"
+    volumes:
+      - ./etc-pihole:/etc/pihole
+    cap_add:
+      - SYS_NICE
+    restart: unless-stopped

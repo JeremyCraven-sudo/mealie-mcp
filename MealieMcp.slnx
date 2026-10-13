@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MealieMcp/MealieMcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MealieMcp.Smoke/MealieMcp.Smoke.csproj" />
+    <Project Path="tests/MealieMcp.Tests/MealieMcp.Tests.csproj" />
+  </Folder>
+</Solution>
