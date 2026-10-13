@@ -48,6 +48,49 @@ public sealed class MealieClient
         return (await response.Content.ReadFromJsonAsync<string>(Json, ct))!;
     }
 
+    public Task<JsonObject> GetRecipeJsonAsync(string slug, CancellationToken ct) =>
+        GetAsync<JsonObject>("api/recipes/" + Uri.EscapeDataString(slug), ct);
+
+    /// <summary>Runs Mealie's NLP ingredient parser. Each result has "input", "confidence" and "ingredient".</summary>
+    public async Task<JsonArray> ParseIngredientsAsync(IReadOnlyList<string> lines, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, "api/parser/ingredients",
+            new { parser = "nlp", ingredients = lines }, ct);
+        return (await response.Content.ReadFromJsonAsync<JsonArray>(Json, ct))!;
+    }
+
+    public async Task<IReadOnlyList<JsonObject>> SearchFoodsAsync(string search, CancellationToken ct)
+    {
+        var page = await GetAsync<JsonObject>($"api/foods?search={Uri.EscapeDataString(search)}&page=1&perPage=20", ct);
+        return page["items"]?.AsArray().OfType<JsonObject>().ToList() ?? [];
+    }
+
+    public async Task<IReadOnlyList<Label>> GetLabelsAsync(CancellationToken ct) =>
+        (await GetAsync<Page<Label>>("api/groups/labels?page=1&perPage=200&orderBy=name", ct)).Items;
+
+    /// <summary>Sets a food's store-section label, round-tripping the rest of the food unchanged.</summary>
+    public async Task SetFoodLabelAsync(string foodId, string labelId, CancellationToken ct)
+    {
+        var path = "api/foods/" + Uri.EscapeDataString(foodId);
+        var food = await GetAsync<JsonObject>(path, ct);
+        food["labelId"] = labelId;
+        food.Remove("label");
+        using var _ = await SendAsync(HttpMethod.Put, path, food, ct);
+    }
+
+    public async Task<JsonObject> CreateFoodAsync(string name, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, "api/foods", new { name }, ct);
+        return (await response.Content.ReadFromJsonAsync<JsonObject>(Json, ct))!;
+    }
+
+    /// <summary>Replaces only the recipe's ingredient list; every other field is left untouched.</summary>
+    public async Task UpdateRecipeIngredientsAsync(string slug, JsonArray ingredients, CancellationToken ct)
+    {
+        using var _ = await SendAsync(HttpMethod.Patch, "api/recipes/" + Uri.EscapeDataString(slug),
+            new JsonObject { ["recipeIngredient"] = ingredients }, ct);
+    }
+
     public async Task<IReadOnlyList<ShoppingListSummary>> GetShoppingListsAsync(CancellationToken ct) =>
         (await GetAsync<Page<ShoppingListSummary>>("api/households/shopping/lists?page=1&perPage=100&orderBy=name", ct)).Items;
 

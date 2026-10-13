@@ -7,11 +7,21 @@ using System.Text.Json;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
+// --call <tool> [json-args] calls one tool, prints its full result, and exits.
 var write = args.Contains("--write");
+string? callTool = null, callArgs = null;
+var callAt = Array.IndexOf(args, "--call");
+if (callAt >= 0 && callAt + 1 < args.Length)
+{
+    callTool = args[callAt + 1];
+    callArgs = callAt + 2 < args.Length ? args[callAt + 2] : null;
+    args = args[..callAt];
+}
+
 args = args.Where(a => a != "--write").ToArray();
 if (args.Length != 1 || !File.Exists(args[0]))
 {
-    Console.Error.WriteLine("Usage: MealieMcp.Smoke <path-to-MealieMcp.exe> [--write]");
+    Console.Error.WriteLine("Usage: MealieMcp.Smoke <path-to-MealieMcp.exe> [--write] [--call <tool> [json-args]]");
     return 2;
 }
 
@@ -24,6 +34,21 @@ var transport = new StdioClientTransport(new StdioClientTransportOptions
 
 await using var client = await McpClient.CreateAsync(transport);
 Console.WriteLine($"Connected: {client.ServerInfo.Name} {client.ServerInfo.Version}");
+
+if (callTool is not null)
+{
+    // "@path" reads the JSON from a file, which sidesteps shell quoting of JSON on Windows.
+    if (callArgs?.StartsWith('@') == true)
+    {
+        callArgs = File.ReadAllText(callArgs[1..]);
+    }
+
+    var parsedArgs = callArgs is null ? null : JsonSerializer.Deserialize<Dictionary<string, object?>>(callArgs);
+    var single = await client.CallToolAsync(callTool, parsedArgs);
+    var body = string.Join("", single.Content.OfType<TextContentBlock>().Select(c => c.Text));
+    Console.WriteLine(single.IsError == true ? $"ERROR: {body}" : body);
+    return single.IsError == true ? 1 : 0;
+}
 
 var tools = await client.ListToolsAsync();
 foreach (var tool in tools.OrderBy(t => t.Name))

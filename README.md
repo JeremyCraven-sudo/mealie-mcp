@@ -11,7 +11,9 @@ It runs locally next to Claude Desktop and talks to Mealie over the LAN or Tails
 |---|---|---|
 | `search_recipes` | read | Search recipes by text; returns slugs |
 | `get_recipe` | read | Ingredients and instructions for a recipe |
-| `import_recipe_from_url` | write | Scrape a recipe page into Mealie |
+| `import_recipe_from_url` | write | Scrape a recipe page into Mealie; warns if the page had no recipe |
+| `parse_recipe_ingredients` | write* | Turn free-text ingredient lines into quantity/unit/food (preview unless `apply=true`) |
+| `set_food_section` | write* | File foods under a store section (e.g. ginger → Produce) |
 | `list_shopping_lists` | read | Shopping lists and their IDs |
 | `create_shopping_list` | write | Create a list (no-op if the name exists) |
 | `get_shopping_list` | read | Items grouped by store section; unchecked only by default |
@@ -21,7 +23,12 @@ It runs locally next to Claude Desktop and talks to Mealie over the LAN or Tails
 | `get_meal_plan` | read | Meal plan for a date range (default: next 7 days) |
 | `add_meal_plan_entry` | write | Put a recipe or free-text meal on a day |
 
-There are deliberately no delete tools. Write tools are marked non-destructive and read tools read-only, using MCP tool annotations.
+There are deliberately no delete tools. Read tools are annotated read-only. Write tools are non-destructive, except the two
+marked * above, which overwrite existing data. `parse_recipe_ingredients` keeps every original line in `originalText`
+and leaves anything it isn't confident about untouched.
+
+Parsing is what makes shopping lists useful: structured ingredients carry a food with a store-section label, so a list
+groups by aisle and merges duplicates. For example, orange juice and orange zest become "3 oranges" under Produce.
 
 ## Configuration
 

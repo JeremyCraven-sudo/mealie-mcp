@@ -98,6 +98,89 @@ public static class RecipeTools
         return ToJson(new { imported = true, slug, recipe.Name, ingredientCount, stepCount });
     });
 
+    [McpServerTool(Name = "parse_recipe_ingredients", Title = "Parse recipe ingredients", Destructive = true, Idempotent = true, OpenWorld = false)]
+    [Description("Turns a recipe's free-text ingredient lines into structured ingredients (quantity, unit, food) so " +
+                 "shopping lists group items by store section and merge duplicates. Previews by default; pass " +
+                 "apply=true to save. Lines matching a known food are converted; confident new foods are created; " +
+                 "anything uncertain is left as text. The original line is always kept.")]
+    public static Task<string> ParseRecipeIngredients(
+        MealieClient mealie,
+        [Description("Recipe slug from search_recipes.")] string slug,
+        [Description("Save the result to the recipe. Leave false to preview first.")] bool apply = false,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        var recipe = await mealie.GetRecipeJsonAsync(slug, ct);
+        var plan = await IngredientParsing.PlanAsync(mealie, recipe, ct);
+        var toChange = plan.Count(p => p.Outcome != ParseOutcome.KeptAsText);
+
+        if (apply && toChange > 0)
+        {
+            await IngredientParsing.ApplyAsync(mealie, slug, recipe, plan, ct);
+        }
+
+        return ToJson(new
+        {
+            slug,
+            applied = apply && toChange > 0,
+            summary = new
+            {
+                matched = plan.Count(p => p.Outcome == ParseOutcome.Matched),
+                newFoods = plan.Count(p => p.Outcome == ParseOutcome.NewFood),
+                keptAsText = plan.Count(p => p.Outcome == ParseOutcome.KeptAsText),
+            },
+            lines = plan.Select(p => new
+            {
+                p.Original,
+                outcome = p.Outcome.ToString(),
+                p.Quantity,
+                p.Unit,
+                p.Food,
+                section = p.Section ?? (p.Outcome == ParseOutcome.NewFood ? "(none until labeled in Mealie)" : null),
+                p.Note,
+                p.Confidence,
+            }),
+        });
+    });
+
+    [McpServerTool(Name = "set_food_section", Title = "Set store section for foods", Destructive = true, Idempotent = true, OpenWorld = false)]
+    [Description("Files foods under a store section (Mealie label), e.g. ginger -> Produce, so shopping lists group " +
+                 "them correctly. Call with no foods to list the available sections.")]
+    public static Task<string> SetFoodSection(
+        MealieClient mealie,
+        [Description("Store section name, e.g. \"Produce\". Must be an existing section.")] string? section = null,
+        [Description("Exact food names to file under the section.")] string[]? foods = null,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        var labels = await mealie.GetLabelsAsync(ct);
+        if (foods is not { Length: > 0 } || string.IsNullOrWhiteSpace(section))
+        {
+            return ToJson(new { sections = labels.Select(l => l.Name) });
+        }
+
+        var label = labels.FirstOrDefault(l => string.Equals(l.Name, section.Trim(), StringComparison.OrdinalIgnoreCase))
+                    ?? throw new MealieApiException(
+                        $"No section named '{section}'. Available: {string.Join(", ", labels.Select(l => l.Name))}.");
+
+        var updated = new List<string>();
+        var notFound = new List<string>();
+        foreach (var name in foods.Select(f => f.Trim()).Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var match = (await mealie.SearchFoodsAsync(name, ct))
+                .FirstOrDefault(f => IngredientParsing.SameFood(f["name"]?.GetValue<string>(), name));
+            if (match?["id"]?.GetValue<string>() is { } id)
+            {
+                await mealie.SetFoodLabelAsync(id, label.Id, ct);
+                updated.Add(match["name"]!.GetValue<string>());
+            }
+            else
+            {
+                notFound.Add(name);
+            }
+        }
+
+        return ToJson(new { section = label.Name, updated, notFound });
+    });
+
     // Mealie fills scrapes that found nothing with these placeholder lines.
     internal static bool IsPlaceholder(string? text) =>
         string.IsNullOrWhiteSpace(text) || text.StartsWith("Could not detect", StringComparison.OrdinalIgnoreCase);
