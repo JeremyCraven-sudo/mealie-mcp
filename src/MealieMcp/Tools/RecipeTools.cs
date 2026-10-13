@@ -64,10 +64,13 @@ public static class RecipeTools
     });
 
     [McpServerTool(Name = "import_recipe_from_url", Title = "Import recipe from URL", Destructive = false, OpenWorld = true)]
-    [Description("Imports a recipe into Mealie by scraping a recipe web page. Returns the new recipe's slug.")]
+    [Description("Imports a recipe into Mealie by scraping a recipe web page. Returns the new recipe's slug, " +
+                 "and a warning if the page had no recipe data (the empty recipe must then be deleted in Mealie).")]
     public static Task<string> ImportRecipeFromUrl(
         MealieClient mealie,
         [Description("Full URL of the recipe page.")] string url,
+        [Description("Also import the page's keywords as tags. Off by default: many sites put the same site-wide keywords on every page.")]
+        bool includeTags = false,
         CancellationToken ct = default) => Run(async () =>
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
@@ -75,7 +78,27 @@ public static class RecipeTools
             throw new MealieApiException($"'{url}' is not a valid http(s) URL.");
         }
 
-        var slug = await mealie.ImportRecipeFromUrlAsync(uri.ToString(), ct);
-        return ToJson(new { imported = true, slug });
+        var slug = await mealie.ImportRecipeFromUrlAsync(uri.ToString(), includeTags, ct);
+        var recipe = await mealie.GetRecipeAsync(slug, ct);
+        var ingredientCount = recipe.RecipeIngredient?.Count(i => !IsPlaceholder(i.Display ?? i.Note)) ?? 0;
+        var stepCount = recipe.RecipeInstructions?.Count(s => !IsPlaceholder(s.Text)) ?? 0;
+
+        if (ingredientCount == 0 && stepCount == 0)
+        {
+            return ToJson(new
+            {
+                imported = false,
+                slug,
+                recipe.Name,
+                warning = "Mealie found no recipe on this page (it may not be a recipe page, or the site blocks scraping). " +
+                          "An empty recipe was created; delete it in Mealie.",
+            });
+        }
+
+        return ToJson(new { imported = true, slug, recipe.Name, ingredientCount, stepCount });
     });
+
+    // Mealie fills scrapes that found nothing with these placeholder lines.
+    internal static bool IsPlaceholder(string? text) =>
+        string.IsNullOrWhiteSpace(text) || text.StartsWith("Could not detect", StringComparison.OrdinalIgnoreCase);
 }

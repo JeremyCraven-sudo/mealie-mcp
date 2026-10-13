@@ -41,10 +41,10 @@ public sealed class MealieClient
         GetAsync<Recipe>("api/recipes/" + Uri.EscapeDataString(slug), ct);
 
     /// <summary>Scrapes a recipe page into Mealie and returns the new recipe's slug.</summary>
-    public async Task<string> ImportRecipeFromUrlAsync(string url, CancellationToken ct)
+    public async Task<string> ImportRecipeFromUrlAsync(string url, bool includeTags, CancellationToken ct)
     {
         using var response = await SendAsync(HttpMethod.Post, "api/recipes/create/url",
-            new { url, includeTags = true }, ct);
+            new { url, includeTags }, ct);
         return (await response.Content.ReadFromJsonAsync<string>(Json, ct))!;
     }
 
