@@ -75,4 +75,4 @@ dotnet run --project tests/MealieMcp.Smoke -- "$PWD\publish\MealieMcp.exe" [--wr
 
 - `src/MealieMcp`: the server (`Mealie/` is the API client, `Tools/` holds the MCP tools)
 - `docs/mealie-openapi-v3.28.0.json`: the Mealie API spec the client was written against
-- `deploy/pi4`: Docker Compose files for the Raspberry Pi that hosts Mealie and Pi-hole
+- The Pi that hosts Mealie is set up from a separate homelab repo.
