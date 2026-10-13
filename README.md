@@ -1,5 +1,7 @@
 # mealie-mcp
 
+[![CI](https://github.com/JeremyCraven-sudo/mealie-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyCraven-sudo/mealie-mcp/actions/workflows/ci.yml)
+
 An [MCP](https://modelcontextprotocol.io) server, written in C# on .NET 10, that lets Claude work with a self-hosted
 [Mealie](https://mealie.io) instance: search recipes, plan meals, and build shopping lists.
 
