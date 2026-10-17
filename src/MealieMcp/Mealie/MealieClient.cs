@@ -103,10 +103,21 @@ public sealed class MealieClient
     public Task<ShoppingList> GetShoppingListAsync(string listId, CancellationToken ct) =>
         GetAsync<ShoppingList>("api/households/shopping/lists/" + Uri.EscapeDataString(listId), ct);
 
-    public async Task AddShoppingListItemsAsync(string listId, IEnumerable<string> items, CancellationToken ct)
+    /// <summary>Renames a list. The update replaces the whole list, so it is round-tripped with only the name changed.</summary>
+    public async Task RenameShoppingListAsync(string listId, string name, CancellationToken ct)
+    {
+        var path = "api/households/shopping/lists/" + Uri.EscapeDataString(listId);
+        var list = await GetAsync<JsonObject>(path, ct);
+        list["name"] = name;
+        using var _ = await SendAsync(HttpMethod.Put, path, list, ct);
+    }
+
+    /// <summary>Adds free-text items, each with an optional store-section label.</summary>
+    public async Task AddShoppingListItemsAsync(
+        string listId, IEnumerable<(string Note, string? LabelId)> items, CancellationToken ct)
     {
         // Free-text items: Mealie shows the note as the item when no food/unit is parsed.
-        var body = items.Select(note => new { shoppingListId = listId, note, quantity = 0 }).ToArray();
+        var body = items.Select(i => new { shoppingListId = listId, note = i.Note, quantity = 0, labelId = i.LabelId }).ToArray();
         using var _ = await SendAsync(HttpMethod.Post, "api/households/shopping/items/create-bulk", body, ct);
     }
 
@@ -117,13 +128,19 @@ public sealed class MealieClient
             $"api/households/shopping/lists/{Uri.EscapeDataString(listId)}/recipe", body, ct);
     }
 
+    /// <summary>Sets the checked state of items, changing nothing else.</summary>
+    /// <returns>The IDs that were not found on the list.</returns>
+    public Task<IReadOnlyList<string>> SetItemsCheckedAsync(
+        string listId, IReadOnlyCollection<string> itemIds, bool isChecked, CancellationToken ct) =>
+        UpdateItemsAsync(listId, itemIds, (_, item) => item["checked"] = isChecked, ct);
+
     /// <summary>
-    /// Sets the checked state of items. Mealie's bulk update replaces whole items, so each item is
-    /// round-tripped from the server as raw JSON and only the "checked" field is changed.
+    /// Edits items on a list. Mealie's bulk update replaces whole items, so each item is round-tripped from the
+    /// server as raw JSON and passed to <paramref name="edit"/> (with its ID) to change only what it needs to.
     /// </summary>
     /// <returns>The IDs that were not found on the list.</returns>
-    public async Task<IReadOnlyList<string>> SetItemsCheckedAsync(
-        string listId, IReadOnlyCollection<string> itemIds, bool isChecked, CancellationToken ct)
+    public async Task<IReadOnlyList<string>> UpdateItemsAsync(
+        string listId, IReadOnlyCollection<string> itemIds, Action<string, JsonObject> edit, CancellationToken ct)
     {
         var list = await GetAsync<JsonObject>("api/households/shopping/lists/" + Uri.EscapeDataString(listId), ct);
         var wanted = itemIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -134,7 +151,7 @@ public sealed class MealieClient
             if (node is JsonObject item && item["id"]?.GetValue<string>() is { } id && wanted.Remove(id))
             {
                 var copy = item.DeepClone().AsObject();
-                copy["checked"] = isChecked;
+                edit(id, copy);
                 updates.Add(copy);
             }
         }
@@ -159,6 +176,25 @@ public sealed class MealieClient
         var body = new { date = date.ToString("yyyy-MM-dd"), entryType, recipeId, title = title ?? "", text = "" };
         using var response = await SendAsync(HttpMethod.Post, "api/households/mealplans", body, ct);
         return (await response.Content.ReadFromJsonAsync<MealPlanEntry>(Json, ct))!;
+    }
+
+    /// <summary>Edits a meal plan entry. The update replaces the whole entry, so it is round-tripped from the server.</summary>
+    public async Task<MealPlanEntry> UpdateMealPlanEntryAsync(int entryId, Action<JsonObject> edit, CancellationToken ct)
+    {
+        var path = $"api/households/mealplans/{entryId}";
+        var entry = await GetAsync<JsonObject>(path, ct);
+        entry.Remove("recipe");
+        edit(entry);
+        using var response = await SendAsync(HttpMethod.Put, path, entry, ct);
+        return (await response.Content.ReadFromJsonAsync<MealPlanEntry>(Json, ct))!;
+    }
+
+    public async Task<MealPlanEntry> DeleteMealPlanEntryAsync(int entryId, CancellationToken ct)
+    {
+        var path = $"api/households/mealplans/{entryId}";
+        var entry = await GetAsync<MealPlanEntry>(path, ct);
+        using var _ = await SendAsync(HttpMethod.Delete, path, body: null, ct);
+        return entry;
     }
 
     private async Task<T> GetAsync<T>(string path, CancellationToken ct)

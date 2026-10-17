@@ -18,16 +18,24 @@ It runs locally next to Claude Desktop and talks to Mealie over the LAN or Tails
 | `set_food_section` | write* | File foods under a store section (e.g. ginger → Produce) |
 | `list_shopping_lists` | read | Shopping lists and their IDs |
 | `create_shopping_list` | write | Create a list (no-op if the name exists) |
+| `rename_shopping_list` | write | Rename a list, e.g. for a store or a specific order |
 | `get_shopping_list` | read | Items grouped by store section; unchecked only by default |
-| `add_shopping_list_items` | write | Add free-text items |
+| `add_shopping_list_items` | write | Add free-text items, filed under a given store section or one guessed from the food |
+| `update_shopping_list_items` | write | Change an item's text, quantity or store section (e.g. the exact product bought) |
 | `add_recipe_to_shopping_list` | write | Add a recipe's ingredients, with optional scaling |
 | `set_shopping_list_items_checked` | write | Check off / un-check items |
+| `set_shopping_list_items_skipped` | write | Mark items skipped / not bought, with an optional reason |
 | `get_meal_plan` | read | Meal plan for a date range (default: next 7 days) |
 | `add_meal_plan_entry` | write | Put a recipe or free-text meal on a day |
+| `update_meal_plan_entry` | write | Move an entry to another day or meal, swap its recipe, or change its text |
+| `remove_meal_plan_entry` | delete | Take an entry off the meal plan (the recipe is not touched) |
 
-There are deliberately no delete tools. Read tools are annotated read-only. Write tools are non-destructive, except the two
-marked * above, which overwrite existing data. `parse_recipe_ingredients` keeps every original line in `originalText`
-and leaves anything it isn't confident about untouched.
+Shopping list items are never deleted: an item that wasn't bought is marked skipped instead. It is checked off and its
+text gets a `[skipped]` tag (or `[skipped: out of stock]`) so the list still records what happened. The only delete tool
+is `remove_meal_plan_entry`, and it is annotated destructive so Claude asks before using it. Read tools are annotated
+read-only. The other write tools are non-destructive, except the two marked * above, which overwrite existing data.
+`parse_recipe_ingredients` keeps every original line in `originalText` and leaves anything it isn't confident about
+untouched.
 
 Parsing is what makes shopping lists useful: structured ingredients carry a food with a store-section label, so a list
 groups by aisle and merges duplicates. For example, orange juice and orange zest become "3 oranges" under Produce.
@@ -53,7 +61,9 @@ dotnet test
 dotnet publish src/MealieMcp -c Release -o publish
 ```
 
-Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
+Add the server to Claude Desktop's config. The easiest way to open the file is **Settings > Developer > Edit Config**.
+Use that rather than a path: the classic installer keeps it at `%APPDATA%\Claude\claude_desktop_config.json`, but the
+Microsoft Store install keeps it elsewhere (for example `%LOCALAPPDATA%\Claude-Data\<package>\claude_desktop_config.json`).
 
 ```json
 {
@@ -65,6 +75,9 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
   }
 }
 ```
+
+Claude Desktop holds its config in memory and writes it back, so quit it fully (including the tray icon) before editing
+the file by hand, or the change can be overwritten. Then reopen it.
 
 Point Desktop at the published `.exe`, not `dotnet run`, because build output written to stdout would corrupt the MCP stream. Quit
 Claude Desktop before republishing; it holds a lock on the exe while it runs.
