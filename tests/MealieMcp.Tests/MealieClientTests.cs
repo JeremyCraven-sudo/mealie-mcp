@@ -77,13 +77,15 @@ public class MealieClientTests
     {
         var (client, handler) = Create(_ => (HttpStatusCode.OK, "{}"));
 
-        await client.AddShoppingListItemsAsync("L1", ["2 lb chicken thighs", "rice"], CancellationToken.None);
+        await client.AddShoppingListItemsAsync("L1", [("2 lb chicken thighs", "meat"), ("rice", null)], CancellationToken.None);
 
         var post = Assert.Single(handler.Requests);
         Assert.Equal("/api/households/shopping/items/create-bulk", post.PathAndQuery);
         var items = JsonNode.Parse(post.Body!)!.AsArray();
         Assert.Equal(["2 lb chicken thighs", "rice"], items.Select(i => i!["note"]!.GetValue<string>()));
         Assert.All(items, i => Assert.Equal("L1", i!["shoppingListId"]!.GetValue<string>()));
+        Assert.Equal("meat", items[0]!["labelId"]!.GetValue<string>());
+        Assert.Null(items[1]!["labelId"]);
     }
 
     [Fact]
@@ -100,6 +102,40 @@ public class MealieClientTests
 
         Assert.Contains("start_date=2026-10-14&end_date=2026-10-20", Assert.Single(handler.Requests).PathAndQuery);
         Assert.Equal("Chili", Assert.Single(entries).Recipe!.Name);
+    }
+
+    [Fact]
+    public async Task RenameShoppingList_RoundTripsList_ChangingOnlyName()
+    {
+        var list = """{"id":"L1","name":"Groceries","groupId":"g","userId":"u","listItems":[{"id":"a","note":"milk"}]}""";
+        var (client, handler) = Create(req => (HttpStatusCode.OK, req.Method == HttpMethod.Get ? list : "{}"));
+
+        await client.RenameShoppingListAsync("L1", "Food Lion 10/17", CancellationToken.None);
+
+        var put = handler.Requests.Single(r => r.Method == HttpMethod.Put);
+        Assert.Equal("/api/households/shopping/lists/L1", put.PathAndQuery);
+        var expected = JsonNode.Parse(list)!.AsObject();
+        expected["name"] = "Food Lion 10/17";
+        Assert.True(JsonNode.DeepEquals(expected, JsonNode.Parse(put.Body!)), $"Unexpected payload: {put.Body}");
+    }
+
+    [Fact]
+    public async Task UpdateMealPlanEntry_RoundTripsEntry_WithoutNestedRecipe()
+    {
+        var entry = """
+            {"id":7,"date":"2026-10-14","entryType":"dinner","title":"","text":"","recipeId":"r1",
+             "groupId":"g","userId":"u","recipe":{"slug":"chili","name":"Chili"}}
+            """;
+        var (client, handler) = Create(_ => (HttpStatusCode.OK, entry));
+
+        await client.UpdateMealPlanEntryAsync(7, e => e["date"] = "2026-10-16", CancellationToken.None);
+
+        var put = handler.Requests.Single(r => r.Method == HttpMethod.Put);
+        Assert.Equal("/api/households/mealplans/7", put.PathAndQuery);
+        var sent = JsonNode.Parse(put.Body!)!.AsObject();
+        Assert.Equal("2026-10-16", sent["date"]!.GetValue<string>());
+        Assert.Equal("r1", sent["recipeId"]!.GetValue<string>());
+        Assert.False(sent.ContainsKey("recipe"));
     }
 
     [Fact]

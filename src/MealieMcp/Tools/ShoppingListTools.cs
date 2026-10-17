@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.RegularExpressions;
 using MealieMcp.Mealie;
 using ModelContextProtocol.Server;
 using static MealieMcp.Tools.ToolHelpers;
@@ -40,8 +41,35 @@ public static class ShoppingListTools
         return ToJson(new { created = true, list.Id, list.Name });
     });
 
+    [McpServerTool(Name = "rename_shopping_list", Title = "Rename shopping list", Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Renames a shopping list, e.g. to label it for a store or a specific order (\"Food Lion pickup 10/17\").")]
+    public static Task<string> RenameShoppingList(
+        MealieClient mealie,
+        [Description("Shopping list ID from list_shopping_lists.")] string listId,
+        [Description("New name for the list.")] string name,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        name = name.Trim();
+        if (name.Length == 0)
+        {
+            throw new MealieApiException("List name is required.");
+        }
+
+        var lists = await mealie.GetShoppingListsAsync(ct);
+        var current = lists.FirstOrDefault(l => string.Equals(l.Id, listId, StringComparison.OrdinalIgnoreCase))
+                      ?? throw new MealieApiException($"No shopping list with ID '{listId}'.");
+        if (lists.Any(l => l != current && string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new MealieApiException($"Another list is already named '{name}'.");
+        }
+
+        await mealie.RenameShoppingListAsync(current.Id, name, ct);
+        return ToJson(new { renamed = true, current.Id, oldName = current.Name, name });
+    });
+
     [McpServerTool(Name = "get_shopping_list", Title = "Get shopping list", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description("Gets the items on a shopping list, grouped by store section (label). By default only unchecked items are returned.")]
+    [Description("Gets the items on a shopping list, grouped by store section (label). By default only unchecked items are returned. " +
+                 "Items marked with set_shopping_list_items_skipped come back with skipped=true.")]
     public static Task<string> GetShoppingList(
         MealieClient mealie,
         [Description("Shopping list ID from list_shopping_lists.")] string listId,
@@ -68,17 +96,22 @@ public static class ShoppingListTools
                         i.Id,
                         text = string.IsNullOrWhiteSpace(i.Display) ? i.Note : i.Display,
                         @checked = includeChecked ? i.Checked : (bool?)null,
+                        skipped = SkipMarker.IsMatch(i.Note ?? "") ? true : (bool?)null,
                     }),
                 }),
         });
     });
 
     [McpServerTool(Name = "add_shopping_list_items", Title = "Add shopping list items", Destructive = false, OpenWorld = false)]
-    [Description("Adds free-text items (e.g. \"2 lb chicken thighs\") to a shopping list.")]
+    [Description("Adds free-text items (e.g. \"2 lb chicken thighs\") to a shopping list. Each item is filed under a store " +
+                 "section: the one given, or else one guessed from a matching food in Mealie (items with no match go under Other). " +
+                 "The item text is kept exactly as written.")]
     public static Task<string> AddShoppingListItems(
         MealieClient mealie,
         [Description("Shopping list ID from list_shopping_lists.")] string listId,
         [Description("Items to add, one entry per item.")] string[] items,
+        [Description("Store section for all the items, e.g. \"Produce\". Must be an existing section name.")] string? section = null,
+        [Description("When no section is given, guess each item's section from the food it mentions.")] bool guessSections = true,
         CancellationToken ct = default) => Run(async () =>
     {
         var cleaned = items.Select(i => i.Trim()).Where(i => i.Length > 0).ToArray();
@@ -87,8 +120,116 @@ public static class ShoppingListTools
             throw new MealieApiException("No items to add.");
         }
 
-        await mealie.AddShoppingListItemsAsync(listId, cleaned, ct);
-        return ToJson(new { added = cleaned.Length, items = cleaned });
+        var labels = await mealie.GetLabelsAsync(ct);
+        var sections = new Label?[cleaned.Length];
+        if (!string.IsNullOrWhiteSpace(section))
+        {
+            Array.Fill(sections, FindLabel(labels, section));
+        }
+        else if (guessSections)
+        {
+            var parsed = await mealie.ParseIngredientsAsync(cleaned, ct);
+            for (var i = 0; i < cleaned.Length; i++)
+            {
+                var line = IngredientParsing.Classify(i, cleaned[i], parsed[i]!.AsObject());
+                if (line is { Outcome: ParseOutcome.Matched, Section: { } name })
+                {
+                    sections[i] = labels.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
+                }
+            }
+        }
+
+        await mealie.AddShoppingListItemsAsync(listId, cleaned.Select((t, i) => (t, sections[i]?.Id)), ct);
+        return ToJson(new
+        {
+            added = cleaned.Length,
+            items = cleaned.Select((t, i) => new { text = t, section = sections[i]?.Name ?? "Other" }),
+        });
+    });
+
+    [McpServerTool(Name = "update_shopping_list_items", Title = "Edit shopping list items", Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Edits items on a shopping list: change the text (e.g. to record the exact product bought or a substitution), " +
+                 "the quantity, or the store section. Fields left out are unchanged.")]
+    public static Task<string> UpdateShoppingListItems(
+        MealieClient mealie,
+        [Description("Shopping list ID from list_shopping_lists.")] string listId,
+        [Description("One edit per item.")] ShoppingItemEdit[] edits,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        if (edits.Length == 0)
+        {
+            throw new MealieApiException("No edits given.");
+        }
+
+        var labels = edits.Any(e => !string.IsNullOrWhiteSpace(e.Section)) ? await mealie.GetLabelsAsync(ct) : [];
+        var byId = new Dictionary<string, (string? Text, double? Quantity, Label? Label)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in edits)
+        {
+            var text = e.Text?.Trim();
+            if (text is { Length: 0 })
+            {
+                throw new MealieApiException($"Text for item {e.ItemId} can't be empty.");
+            }
+
+            if (e.Quantity < 0)
+            {
+                throw new MealieApiException($"Quantity for item {e.ItemId} can't be negative.");
+            }
+
+            byId[e.ItemId] = (text, e.Quantity, string.IsNullOrWhiteSpace(e.Section) ? null : FindLabel(labels, e.Section));
+        }
+
+        var notFound = await mealie.UpdateItemsAsync(listId, byId.Keys, (id, item) =>
+        {
+            var (text, quantity, label) = byId[id];
+            if (text is not null)
+            {
+                // New wording replaces the parsed food/unit, making it a plain-text item; its section is kept.
+                item["note"] = text;
+                foreach (var key in new[] { "food", "foodId", "unit", "unitId" })
+                {
+                    item[key] = null;
+                }
+            }
+
+            if (quantity is not null)
+            {
+                item["quantity"] = quantity;
+            }
+
+            if (label is not null)
+            {
+                item["labelId"] = label.Id;
+                item.Remove("label");
+            }
+
+            item.Remove("display");
+        }, ct);
+
+        return ToJson(new { updated = byId.Count - notFound.Count, notFound });
+    });
+
+    [McpServerTool(Name = "set_shopping_list_items_skipped", Title = "Mark items skipped", Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Marks items as skipped / not bought (e.g. out of stock, or replaced by a substitute) without deleting them: " +
+                 "the item is checked off and tagged \"[skipped]\" with an optional reason. Pass skipped=false to undo.")]
+    public static Task<string> SetShoppingListItemsSkipped(
+        MealieClient mealie,
+        [Description("Shopping list ID from list_shopping_lists.")] string listId,
+        [Description("Item IDs from get_shopping_list.")] string[] itemIds,
+        [Description("Optional reason, e.g. \"out of stock\" or \"subbed with store brand\".")] string? reason = null,
+        [Description("true to mark items skipped, false to clear the mark and un-check them.")] bool skipped = true,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        var marker = string.IsNullOrWhiteSpace(reason) ? "[skipped]" : $"[skipped: {reason.Trim().Replace("]", ")")}]";
+        var notFound = await mealie.UpdateItemsAsync(listId, itemIds, (_, item) =>
+        {
+            var note = SkipMarker.Replace(item["note"]?.GetValue<string>() ?? "", "");
+            item["note"] = skipped ? (note.Length == 0 ? marker : $"{note} {marker}") : note;
+            item["checked"] = skipped;
+            item.Remove("display");
+        }, ct);
+
+        return ToJson(new { updated = itemIds.Length - notFound.Count, skipped, notFound });
     });
 
     [McpServerTool(Name = "add_recipe_to_shopping_list", Title = "Add recipe ingredients to shopping list", Destructive = false, OpenWorld = false)]
@@ -127,4 +268,18 @@ public static class ShoppingListTools
         var notFound = await mealie.SetItemsCheckedAsync(listId, itemIds, isChecked, ct);
         return ToJson(new { updated = itemIds.Length - notFound.Count, notFound });
     });
+
+    /// <summary>The tag set_shopping_list_items_skipped appends to an item's note.</summary>
+    internal static readonly Regex SkipMarker = new(@"\s*\[skipped(?::[^\]]*)?\]\s*$", RegexOptions.IgnoreCase);
+
+    private static Label FindLabel(IReadOnlyList<Label> labels, string name) =>
+        labels.FirstOrDefault(l => string.Equals(l.Name, name.Trim(), StringComparison.OrdinalIgnoreCase))
+        ?? throw new MealieApiException(
+            $"No store section named '{name.Trim()}'. Sections: {string.Join(", ", labels.Select(l => l.Name))}.");
 }
+
+public sealed record ShoppingItemEdit(
+    [property: Description("Item ID from get_shopping_list.")] string ItemId,
+    [property: Description("New text for the item, e.g. \"Kroger 2% milk, 1 gal (subbed for Horizon)\".")] string? Text = null,
+    [property: Description("New quantity.")] double? Quantity = null,
+    [property: Description("Store section to move the item to, e.g. \"Dairy\".")] string? Section = null);

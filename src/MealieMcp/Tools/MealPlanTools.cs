@@ -12,7 +12,8 @@ public static class MealPlanTools
     public static readonly string[] EntryTypes = ["breakfast", "lunch", "dinner", "side", "snack", "drink", "dessert"];
 
     [McpServerTool(Name = "get_meal_plan", Title = "Get meal plan", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description("Gets meal plan entries between two dates (inclusive). Defaults to the next 7 days.")]
+    [Description("Gets meal plan entries between two dates (inclusive). Defaults to the next 7 days. " +
+                 "Each entry's id is what update_meal_plan_entry and remove_meal_plan_entry take.")]
     public static Task<string> GetMealPlan(
         MealieClient mealie,
         [Description("Start date, yyyy-MM-dd. Defaults to today.")] string? startDate = null,
@@ -29,6 +30,7 @@ public static class MealPlanTools
         var entries = await mealie.GetMealPlanAsync(start, end, ct);
         return ToJson(entries.Select(e => new
         {
+            e.Id,
             date = e.Date.ToString("yyyy-MM-dd"),
             day = e.Date.DayOfWeek.ToString(),
             e.EntryType,
@@ -50,11 +52,7 @@ public static class MealPlanTools
         CancellationToken ct = default) => Run(async () =>
     {
         var day = ParseDate(date, nameof(date)) ?? throw new MealieApiException("date is required.");
-        var type = entryType.Trim().ToLowerInvariant();
-        if (!EntryTypes.Contains(type))
-        {
-            throw new MealieApiException($"entryType must be one of: {string.Join(", ", EntryTypes)}.");
-        }
+        var type = ParseEntryType(entryType);
 
         if (string.IsNullOrWhiteSpace(recipeSlug) && string.IsNullOrWhiteSpace(title))
         {
@@ -72,6 +70,83 @@ public static class MealPlanTools
         var entry = await mealie.CreateMealPlanEntryAsync(day, type, recipeId, title, ct);
         return ToJson(new { added = true, entry.Id, date = entry.Date.ToString("yyyy-MM-dd"), entryType = type, recipe = recipeName, title });
     });
+
+    [McpServerTool(Name = "update_meal_plan_entry", Title = "Change meal plan entry", Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Changes a meal plan entry: move it to another date or meal, swap its recipe, or change its text. Fields left out are unchanged.")]
+    public static Task<string> UpdateMealPlanEntry(
+        MealieClient mealie,
+        [Description("Entry id from get_meal_plan.")] int entryId,
+        [Description("New date, yyyy-MM-dd.")] string? date = null,
+        [Description("New meal: breakfast, lunch, dinner, side, snack, drink, or dessert.")] string? entryType = null,
+        [Description("Recipe slug from search_recipes to put on the entry instead.")] string? recipeSlug = null,
+        [Description("New text for the entry.")] string? title = null,
+        [Description("Remove the recipe, leaving a free-text entry (needs a title if the entry has none).")] bool clearRecipe = false,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        var day = ParseDate(date, nameof(date));
+        var type = entryType is null ? null : ParseEntryType(entryType);
+        if (clearRecipe && !string.IsNullOrWhiteSpace(recipeSlug))
+        {
+            throw new MealieApiException("Pass either recipeSlug or clearRecipe, not both.");
+        }
+
+        string? recipeId = null;
+        if (!string.IsNullOrWhiteSpace(recipeSlug))
+        {
+            recipeId = (await mealie.GetRecipeAsync(recipeSlug, ct)).Id;
+        }
+
+        var entry = await mealie.UpdateMealPlanEntryAsync(entryId, e =>
+        {
+            if (day is not null) e["date"] = day.Value.ToString("yyyy-MM-dd");
+            if (type is not null) e["entryType"] = type;
+            if (recipeId is not null) e["recipeId"] = recipeId;
+            if (clearRecipe) e["recipeId"] = null;
+            if (title is not null) e["title"] = title.Trim();
+
+            if (e["recipeId"] is null && string.IsNullOrWhiteSpace(e["title"]?.GetValue<string>()))
+            {
+                throw new MealieApiException("Without a recipe the entry needs a title.");
+            }
+        }, ct);
+
+        return ToJson(new
+        {
+            updated = true,
+            entry.Id,
+            date = entry.Date.ToString("yyyy-MM-dd"),
+            entry.EntryType,
+            recipe = entry.Recipe?.Name,
+            title = string.IsNullOrWhiteSpace(entry.Title) ? null : entry.Title,
+        });
+    });
+
+    [McpServerTool(Name = "remove_meal_plan_entry", Title = "Remove meal plan entry", Destructive = true, Idempotent = true, OpenWorld = false)]
+    [Description("Removes an entry from the meal plan. Only the plan entry is removed; the recipe itself is not affected.")]
+    public static Task<string> RemoveMealPlanEntry(
+        MealieClient mealie,
+        [Description("Entry id from get_meal_plan.")] int entryId,
+        CancellationToken ct = default) => Run(async () =>
+    {
+        var entry = await mealie.DeleteMealPlanEntryAsync(entryId, ct);
+        return ToJson(new
+        {
+            removed = true,
+            entry.Id,
+            date = entry.Date.ToString("yyyy-MM-dd"),
+            entry.EntryType,
+            recipe = entry.Recipe?.Name,
+            title = string.IsNullOrWhiteSpace(entry.Title) ? null : entry.Title,
+        });
+    });
+
+    private static string ParseEntryType(string value)
+    {
+        var type = value.Trim().ToLowerInvariant();
+        return EntryTypes.Contains(type)
+            ? type
+            : throw new MealieApiException($"entryType must be one of: {string.Join(", ", EntryTypes)}.");
+    }
 
     private static DateOnly? ParseDate(string? value, string name)
     {
